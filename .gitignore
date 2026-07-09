@@ -1,0 +1,30 @@
+# Binaries
+bin/
+dist/
+
+# Go
+*.test
+*.out
+coverage.txt
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+*.pem
+*.key
+!testdata/*.pem
+
+# Local config
+*.local.yaml
+*.local.yml
