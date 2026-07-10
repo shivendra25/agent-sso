@@ -330,12 +330,14 @@ func TestIsValidResourceURI(t *testing.T) {
 		{"https://mcp.example.com/path", true},
 		{"https://mcp.example.com:8443", true},
 		{"https://localhost:3000/mcp", true},
-		{"http://mcp.example.com", false},       // non-https
+		{"http://127.0.0.1:12345", true},        // http allowed for dev
+		{"http://localhost:3000/mcp", true},     // http allowed for dev
 		{"mcp.example.com", false},              // no scheme
 		{"https://mcp.example.com#frag", false}, // has fragment
 		{"", false},                             // empty
 		{"https://", false},                     // no host
 		{"https://mcp.example.com:abc", false},  // non-numeric port
+		{"ftp://mcp.example.com", false},        // unsupported scheme
 	}
 	for _, tt := range tests {
 		got := isValidResourceURI(tt.uri)

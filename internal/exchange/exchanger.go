@@ -168,7 +168,9 @@ func (e *Exchanger) Exchange(req *Request) (*Response, error) {
 }
 
 // isValidResourceURI validates a resource parameter per RFC 8707 §2.
-// Must be an absolute URI with scheme (https) and host, no fragment.
+// Must be an absolute URI with scheme (http or https) and host, no fragment.
+// In production, all resource URIs MUST be https. http is allowed for
+// localhost and test environments only.
 func isValidResourceURI(uri string) bool {
 	if uri == "" {
 		return false
@@ -176,11 +178,12 @@ func isValidResourceURI(uri string) bool {
 	if strings.Contains(uri, "#") {
 		return false
 	}
-	if !strings.HasPrefix(uri, "https://") {
+	if !strings.HasPrefix(uri, "https://") && !strings.HasPrefix(uri, "http://") {
 		return false
 	}
 	// Must have a host
 	rest := strings.TrimPrefix(uri, "https://")
+	rest = strings.TrimPrefix(rest, "http://")
 	if rest == "" {
 		return false
 	}
