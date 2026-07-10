@@ -24,6 +24,7 @@ import (
 
 	"github.com/shivendra25/agent-sso/internal/attest"
 	"github.com/shivendra25/agent-sso/internal/crypto"
+	"github.com/shivendra25/agent-sso/internal/exchange"
 	"github.com/shivendra25/agent-sso/internal/jwt"
 )
 
@@ -47,14 +48,15 @@ func DefaultConfig() Config {
 
 // Server is the Agent Identity Provider HTTP server.
 type Server struct {
-	config   Config
-	keyPair  *crypto.KeyPair
-	signer   *jwt.Signer
-	verifier *jwt.Verifier
-	issuer   *attest.Issuer
-	logger   *slog.Logger
-	mux      *http.ServeMux
-	http     *http.Server
+	config    Config
+	keyPair   *crypto.KeyPair
+	signer    *jwt.Signer
+	verifier  *jwt.Verifier
+	issuer    *attest.Issuer
+	exchanger *exchange.Exchanger
+	logger    *slog.Logger
+	mux       *http.ServeMux
+	http      *http.Server
 }
 
 // New creates a new aIdP server.
@@ -79,6 +81,12 @@ func New(cfg Config, kp *crypto.KeyPair, logger *slog.Logger) *Server {
 func (s *Server) SetIssuer(issuer *attest.Issuer) {
 	s.issuer = issuer
 	s.mux.HandleFunc("/v1/attest", s.handleAttest)
+}
+
+// SetExchanger configures the token exchange endpoint.
+func (s *Server) SetExchanger(ex *exchange.Exchanger) {
+	s.exchanger = ex
+	s.mux.HandleFunc("/oauth/token", s.handleTokenExchange)
 }
 
 // registerRoutes wires all HTTP routes.
@@ -120,6 +128,54 @@ func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "session_expired", err.Error())
 		default:
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTokenExchange is the RFC 8693 token exchange endpoint (POST /oauth/token).
+func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
+	if s.exchanger == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "token exchange not configured")
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "malformed form body")
+		return
+	}
+
+	req := exchange.Request{
+		GrantType:          r.FormValue("grant_type"),
+		SubjectToken:       r.FormValue("subject_token"),
+		SubjectTokenType:   r.FormValue("subject_token_type"),
+		Resource:           r.FormValue("resource"),
+		Scope:              r.FormValue("scope"),
+		RequestedTokenType: r.FormValue("requested_token_type"),
+	}
+
+	resp, err := s.exchanger.Exchange(&req)
+	if err != nil {
+		switch {
+		case errors.Is(err, exchange.ErrInvalidGrantType):
+			writeError(w, http.StatusBadRequest, "unsupported_grant_type", err.Error())
+		case errors.Is(err, exchange.ErrMissingSubjectToken),
+			errors.Is(err, exchange.ErrMissingResource),
+			errors.Is(err, exchange.ErrMissingScope),
+			errors.Is(err, exchange.ErrInvalidResource):
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		case errors.Is(err, exchange.ErrPolicyDenied):
+			writeError(w, http.StatusForbidden, "invalid_scope", err.Error())
+		case errors.Is(err, exchange.ErrPolicyNarrowedToEmpty):
+			writeError(w, http.StatusForbidden, "insufficient_scope", err.Error())
+		default:
+			writeError(w, http.StatusUnauthorized, "invalid_token", err.Error())
 		}
 		return
 	}

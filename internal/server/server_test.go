@@ -2,18 +2,23 @@ package server
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/shivendra25/agent-sso/internal/attest"
 	"github.com/shivendra25/agent-sso/internal/attestation"
 	"github.com/shivendra25/agent-sso/internal/crypto"
+	"github.com/shivendra25/agent-sso/internal/exchange"
 	"github.com/shivendra25/agent-sso/internal/idp"
 	"github.com/shivendra25/agent-sso/internal/jwt"
 )
@@ -290,5 +295,105 @@ func TestAttestEndpointWrongMethod(t *testing.T) {
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+// --- /oauth/token endpoint tests ---
+
+func setupTestExchanger(t *testing.T, srv *Server) (*exchange.Exchanger, *jwt.Signer, *crypto.KeyPair) {
+	t.Helper()
+	kp, err := crypto.GenerateKeyPair("token-exchange-test")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	signer := jwt.NewSigner(kp)
+	verifier := jwt.NewVerifier(map[crypto.KeyID]*ecdsa.PublicKey{kp.KeyID: kp.Public})
+	policy := &exchange.MockPolicyEvaluator{AllowAll: true}
+
+	srv.keyPair = kp
+	srv.signer = signer
+	srv.verifier = verifier
+
+	ex := exchange.NewExchanger(verifier, signer, policy, "https://aidp.test", 5*time.Minute)
+	return ex, signer, kp
+}
+
+func TestTokenExchangeEndpointSuccess(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ex, signer, _ := setupTestExchanger(t, srv)
+	srv.SetExchanger(ex)
+
+	now := time.Now()
+	aitClaims := &jwt.AITClaims{
+		Issuer:   "https://aidp.test",
+		Subject:  "a:test-agent-001",
+		Audience: "https://aidp.test/oauth/token",
+		Exp:      now.Add(15 * time.Minute).Unix(),
+		Iat:      now.Unix(),
+		Nbf:      now.Unix(),
+		JTI:      "ait_" + uuid.NewString(),
+		ClientID: "test-client",
+		Scope:    jwt.ScopeAgentAttest + " " + jwt.ScopeToolsExchange,
+		Act:      &jwt.ActorClaim{Sub: "oidc:okta:user-001", Iss: "https://test.okta.com"},
+	}
+	ait, _ := signer.SignAIT(aitClaims)
+
+	form := url.Values{}
+	form.Set("grant_type", exchange.GrantTypeTokenExchange)
+	form.Set("subject_token", ait)
+	form.Set("subject_token_type", exchange.TokenTypeAccessToken)
+	form.Set("resource", "https://mcp.github.example.com")
+	form.Set("scope", "github:prs:read")
+
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp exchange.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.AccessToken == "" {
+		t.Fatal("AccessToken is empty")
+	}
+	if resp.Scope != "github:prs:read" {
+		t.Errorf("Scope = %q", resp.Scope)
+	}
+}
+
+func TestTokenExchangeEndpointWrongMethod(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ex, _, _ := setupTestExchanger(t, srv)
+	srv.SetExchanger(ex)
+
+	req := httptest.NewRequest(http.MethodGet, "/oauth/token", nil)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestTokenExchangeEndpointMissingFields(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ex, _, _ := setupTestExchanger(t, srv)
+	srv.SetExchanger(ex)
+
+	form := url.Values{}
+	form.Set("grant_type", exchange.GrantTypeTokenExchange)
+
+	req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
