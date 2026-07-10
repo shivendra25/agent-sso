@@ -22,7 +22,7 @@ Agents today authenticate with long-lived static API keys that:
 
 ### The solution
 
-AgentSSO provides five pillars (v1 ships the first three):
+AgentSSO provides five pillars (v0.1 ships the first five):
 
 1. **Agent Identity Provider (aIdP)** — issues short-lived Agent Identity
    Tokens (AIT) bound to a human principal via RFC 8693 delegation.
@@ -31,8 +31,12 @@ AgentSSO provides five pillars (v1 ships the first three):
    tools, same promise as enterprise SSO.
 3. **Credential Boundary / Tool Gateway** — credentials never enter the LLM
    context; the gateway injects `Authorization` headers out-of-band.
-4. *(v2)* Step-up MFA for sensitive scopes (passkey/WebAuthn).
-5. *(v2)* Verifiable delegation chain + tamper-evident audit.
+4. **Audit log** — hash-chained, tamper-evident log linking every action to a
+   human principal.
+5. **Continuous re-attestation** — codebase/runtime drift detection auto-revokes
+   AITs on change.
+6. *(v2)* Step-up MFA for sensitive scopes (passkey/WebAuthn).
+7. *(v2)* Verifiable delegation chain (W3C VC) + agent-to-agent (A2A).
 
 ### Standards-first
 
@@ -52,32 +56,47 @@ AgentSSO is built on existing IETF standards for interoperability:
 
 ```
 agent-sso/
-├── cmd/                 # service binaries (aidp, gateway, admin)
+├── cmd/                 # service binaries
+│   ├── aidp/            # Agent Identity Provider server
+│   └── gateway/         # Credential Boundary Gateway server
 ├── internal/            # private packages
-│   ├── attestation/     # attestation schema + verifier
+│   ├── attest/          # AIT issuance (attestation + OIDC → AIT)
+│   ├── attestation/     # attestation schema, verifier, registry
 │   ├── audit/           # hash-chained append-only audit log
 │   ├── crypto/          # ES256 keypair, JWKS signer/verifier
+│   ├── exchange/        # RFC 8693 token exchange
+│   ├── gateway/         # credential boundary reverse proxy
 │   ├── idp/             # OIDC inbound connector
-│   ├── jwt/             # AIT struct + claim mapping
-│   ├── policy/          # OPA/Rego policy engine
-│   ├── registry/        # agent runtime + MCP server registries
-│   └── server/          # HTTP routes, metadata, handlers
-├── pkg/                 # public packages (agent SDK)
+│   ├── integration/     # end-to-end integration tests
+│   ├── jwt/             # AIT/JIT structs + claim mapping
+│   ├── policy/          # policy engine (default-deny scope eval)
+│   ├── reattest/        # continuous re-attestation + drift detection
+│   ├── registry/        # MCP server registry + RFC 9728 discovery
+│   └── server/          # aIdP HTTP routes, metadata, handlers
+├── pkg/agent/           # public agent SDK
 ├── docs/
 │   ├── spec/            # AIT/attestation specs, standards mapping
-│   └── threat-model/    # STRIDE threats, mitigations, boundaries
-├── policies/            # Rego policy files
-├── examples/            # usage examples
-├── scripts/             # dev/build helpers
-└── deploy/              # Docker, k8s manifests
+│   ├── threat-model/    # STRIDE threats, mitigations, boundaries
+│   └── quickstart.md    # getting started guide
+├── policies/            # policy files
+└── examples/            # usage examples
 ```
 
 ## Project status
 
-**Phase 0 (current)** — Spec & threat model.
+**v0.1.0** — Working prototype with 115 tests passing.
 
-See [docs/spec/](docs/spec/) for the full design and
-[docs/threat-model/](docs/threat-model/) for the threat model.
+All v1 pillars are implemented and verified by the end-to-end integration
+test (`internal/integration/e2e_test.go`), which proves:
+- Agent calls MCP server with zero static secrets
+- OIDC-federated human identity via RFC 8693 delegation chain
+- Audience-bound JIT tokens (RFC 8707)
+- Injection-proof credential boundary (no tokens in LLM context)
+- Policy engine blocks unauthorized scopes
+
+See [docs/spec/](docs/spec/) for the full design,
+[docs/threat-model/](docs/threat-model/) for the threat model, and
+[docs/quickstart.md](docs/quickstart.md) to get started.
 
 ## Build
 
