@@ -16,10 +16,13 @@ package server
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/shivendra25/agent-sso/internal/attest"
 	"github.com/shivendra25/agent-sso/internal/crypto"
 	"github.com/shivendra25/agent-sso/internal/jwt"
 )
@@ -48,6 +51,7 @@ type Server struct {
 	keyPair  *crypto.KeyPair
 	signer   *jwt.Signer
 	verifier *jwt.Verifier
+	issuer   *attest.Issuer
 	logger   *slog.Logger
 	mux      *http.ServeMux
 	http     *http.Server
@@ -71,11 +75,56 @@ func New(cfg Config, kp *crypto.KeyPair, logger *slog.Logger) *Server {
 	return s
 }
 
+// SetIssuer configures the AIT issuance endpoint.
+func (s *Server) SetIssuer(issuer *attest.Issuer) {
+	s.issuer = issuer
+	s.mux.HandleFunc("/v1/attest", s.handleAttest)
+}
+
 // registerRoutes wires all HTTP routes.
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/.well-known/oauth-authorization-server", s.handleASMetadata)
 	s.mux.HandleFunc("/.well-known/jwks.json", s.handleJWKS)
+}
+
+// handleAttest is the AIT issuance endpoint (POST /v1/attest).
+func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
+	if s.issuer == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "AIT issuer not configured")
+		return
+	}
+
+	var req attest.Request
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "malformed JSON body")
+		return
+	}
+
+	resp, err := s.issuer.Issue(&req)
+	if err != nil {
+		switch {
+		case errors.Is(err, attest.ErrMissingAttestation):
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		case errors.Is(err, attest.ErrMissingIDToken):
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		case errors.Is(err, attest.ErrAttestationFailed):
+			writeError(w, http.StatusUnauthorized, "invalid_attestation", err.Error())
+		case errors.Is(err, attest.ErrPrincipalFailed):
+			writeError(w, http.StatusUnauthorized, "invalid_token", err.Error())
+		case errors.Is(err, attest.ErrSessionExpired):
+			writeError(w, http.StatusUnauthorized, "session_expired", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ListenAndServe starts the HTTP server.

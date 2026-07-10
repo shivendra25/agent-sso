@@ -1,14 +1,21 @@
 package server
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/shivendra25/agent-sso/internal/attest"
+	"github.com/shivendra25/agent-sso/internal/attestation"
 	"github.com/shivendra25/agent-sso/internal/crypto"
+	"github.com/shivendra25/agent-sso/internal/idp"
+	"github.com/shivendra25/agent-sso/internal/jwt"
 )
 
 func newTestServer(t *testing.T) (*Server, *crypto.KeyPair) {
@@ -142,4 +149,146 @@ func contains(slice []string, val string) bool {
 		}
 	}
 	return false
+}
+
+// --- /v1/attest endpoint tests ---
+
+func setupTestIssuer(t *testing.T) (*attest.Issuer, *idp.IDTokenMinter, *attestation.AttestationSigner) {
+	t.Helper()
+
+	kp, err := crypto.GenerateKeyPair("aidp-attest-test")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	signer := jwt.NewSigner(kp)
+
+	idpKey, err := crypto.GenerateKeyPair("idp-attest-test")
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	minter := idp.NewIDTokenMinter(idpKey, "https://test.okta.com")
+
+	providers := idp.NewProviderRegistry()
+	providers.Register(idp.ProviderConfig{
+		Alias:    "okta",
+		Issuer:   "https://test.okta.com",
+		ClientID: "test-client-id",
+	}, idp.NewJWKSVerifier(idp.ProviderConfig{
+		Alias:    "okta",
+		Issuer:   "https://test.okta.com",
+		ClientID: "test-client-id",
+	}, idp.MinterToVerifierKeys(idpKey)))
+
+	hostPub, hostPriv, _ := ed25519.GenerateKey(nil)
+	attestRegistry := attestation.NewMemoryRegistry()
+	attestRegistry.Register(&attestation.AgentRegistration{
+		AgentID:          "a:test-agent-001",
+		HostID:           "host-001",
+		HostPublicKey:    hostPub,
+		AllowedCodebases: []string{"sha256:abc123"},
+		AllowedRuntimes:  []string{"sha256:def456"},
+	})
+	attestVerifier := attestation.NewVerifier(attestRegistry)
+	attestSigner := attestation.NewAttestationSigner("host-001", hostPriv)
+	_ = hostPriv
+
+	issuer := attest.NewIssuer(
+		attestVerifier, providers, signer,
+		"https://aidp.test", "https://aidp.test/oauth/token",
+		15*time.Minute,
+	)
+	return issuer, minter, attestSigner
+}
+
+func TestAttestEndpointSuccess(t *testing.T) {
+	srv, _ := newTestServer(t)
+	issuer, minter, attestSigner := setupTestIssuer(t)
+	srv.SetIssuer(issuer)
+
+	idToken, _ := minter.MintIDToken("user-001", "test-client-id", nil)
+
+	doc := &attestation.AttestationDocument{
+		AgentID:      "a:test-agent-001",
+		CodebaseHash: "sha256:abc123",
+		RuntimeHash:  "sha256:def456",
+		StartedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(15 * time.Minute),
+		HostID:       "host-001",
+		JTI:          "att-ep-001",
+	}
+	signedAtt, _ := attestSigner.Sign(doc)
+
+	body, _ := json.Marshal(map[string]string{
+		"signed_attestation":  signedAtt,
+		"oidc_id_token":       idToken,
+		"oidc_provider_alias": "okta",
+		"tenant_id":           "tnt_test",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/attest", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp attest.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.AIT == "" {
+		t.Fatal("AIT is empty in response")
+	}
+	if resp.AgentID != "a:test-agent-001" {
+		t.Errorf("AgentID = %q", resp.AgentID)
+	}
+}
+
+func TestAttestEndpointMissingFields(t *testing.T) {
+	srv, _ := newTestServer(t)
+	issuer, _, _ := setupTestIssuer(t)
+	srv.SetIssuer(issuer)
+
+	body, _ := json.Marshal(map[string]string{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/attest", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestAttestEndpointInvalidAttestation(t *testing.T) {
+	srv, _ := newTestServer(t)
+	issuer, _, _ := setupTestIssuer(t)
+	srv.SetIssuer(issuer)
+
+	body, _ := json.Marshal(map[string]string{
+		"signed_attestation":  "garbage",
+		"oidc_id_token":       "some-token",
+		"oidc_provider_alias": "okta",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/attest", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestAttestEndpointWrongMethod(t *testing.T) {
+	srv, _ := newTestServer(t)
+	issuer, _, _ := setupTestIssuer(t)
+	srv.SetIssuer(issuer)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/attest", nil)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
 }
