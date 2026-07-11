@@ -1,0 +1,89 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  min-height: 100vh;
+}
+
+body {
+  @apply bg-surface-0 text-gray-200 font-sans antialiased;
+  background-image: radial-gradient(
+      ellipse at top left,
+      rgba(59, 130, 246, 0.08) 0%,
+      transparent 50%
+    ),
+    radial-gradient(
+      ellipse at bottom right,
+      rgba(168, 85, 247, 0.08) 0%,
+      transparent 50%
+    );
+  background-attachment: fixed;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-surface-50;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-surface-300 rounded;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-surface-400;
+}
+
+.gradient-text {
+  @apply bg-gradient-to-r from-brand-400 via-accent-purple to-accent-cyan bg-clip-text text-transparent;
+}
+
+.card {
+  @apply bg-surface-50/80 backdrop-blur-sm border border-surface-300 rounded-xl transition-all;
+}
+.card:hover {
+  @apply border-brand-500/40 shadow-lg shadow-brand-900/20;
+}
+
+.glow-border {
+  @apply relative;
+}
+.glow-border::before {
+  content: "";
+  @apply absolute inset-0 rounded-xl opacity-0 transition-opacity pointer-events-none;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.4), rgba(168, 85, 247, 0.4));
+}
+.glow-border:hover::before {
+  @apply opacity-100;
+}
+
+.token-particle {
+  @apply absolute w-2.5 h-2.5 rounded-full;
+  animation: token-move 2s linear infinite;
+}
+
+@keyframes token-move {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
